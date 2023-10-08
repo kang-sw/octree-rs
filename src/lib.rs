@@ -22,30 +22,27 @@ pub trait Dimension<const D: usize, const N: usize>: Default + Clone {
 
 /// Comparable coordinate item.
 ///
-/// To implement your own comparable node type, you must implement this trait for your type.
-///
 /// ```
 /// struct MyPoint {
 ///     x: i32,
 ///     y: i32,
-///     value: String,
 /// }
 ///
-/// impl ndtree::TreeItem<2> for MyPoint {
+/// impl ndtree::TreeKey<2> for MyPoint {
 ///     fn compare(&self, other: &Self) -> [std::cmp::Ordering; 2] {
 ///         [self.x.cmp(&other.x), self.y.cmp(&other.y)]
 ///     }
 /// }
 ///
-/// let quad_tree = ndtree::QuadTree::<MyPoint>::new();
+/// let quad_tree = ndtree::QuadTreeMap::<MyPoint, String>::new();
 /// ```
 ///
 /// Otherwise, the library provides default implementation for every tuple that has comparable first
 /// entity or comparable items array.
 ///
 /// ```
-/// let quad_tree = ndtree::QuadTree::<[i32;2]>::new();
-/// let quad_tree = ndtree::QuadTree::<([i32;2], String)>::new();
+/// let quad_tree = ndtree::QuadTreeMap::<[i32;2], String>::new();
+/// let quad_tree = ndtree::QuadTreeMap::<(i32, f32), String>::new();
 /// ```
 pub trait TreeKey<const D: usize> {
     fn compare(&self, other: &Self) -> [Ordering; D];
@@ -56,10 +53,10 @@ pub trait TreeKey<const D: usize> {
 /// Type parameter `D` is the dimensionality of the tree, `N` is the number of children per node.
 /// `N` must be equal to `2^D`.
 ///
-/// The key of tree argument must implement [`TreeItem`].
+/// The key of tree argument must implement [`TreeKey`].
 ///
 /// ```
-/// let quad_tree = ndtree::Tree::<([i32;2], bool), ndtree::dims::Dimension<2, 4>, 2, 4>::new();
+/// let quad_tree = ndtree::TreeMap::<[i32;2], Vec<String>, ndtree::dims::Dimension<2, 4>, 2, 4>::new();
 /// ```
 ///
 /// ---
@@ -68,8 +65,8 @@ pub trait TreeKey<const D: usize> {
 /// specifying the type parameters like above.
 ///
 /// ```
-/// let quad_tree = ndtree::QuadTree::<([i32;2], String)>::new();
-/// let quad_tree = ndtree::QuadTree::<[i32;2]>::new();
+/// let quad_tree = ndtree::QuadTreeMap::<(i32, f64), String>::new();
+/// let quad_tree = ndtree::QuadTreeMap::<[i32;2], bool>::new();
 /// ```
 ///
 /// ---
@@ -95,7 +92,7 @@ where
     value: V,
 }
 
-pub mod items {
+pub mod key_types {
     use crate::TreeKey;
 
     #[cfg(not(feature = "assert-partial-ord"))]
@@ -124,6 +121,54 @@ pub mod items {
                     .unwrap()
             })
         }
+    }
+
+    /* ---------------------------------------- Tuple Key --------------------------------------- */
+
+    #[rustfmt::skip]
+    mod tup_impl {
+        use super::*;
+        
+        macro_rules! tup_compare {
+            ($n:literal, [$($numbers:tt),*], [$($args:ident),*]) => {
+                #[cfg(not(feature = "assert-partial-ord"))]
+                impl <$($args),*> TreeKey<$n> for ($($args,)*)
+                    where $($args: Clone + Ord),*
+                {
+                    #[allow(non_snake_case)]
+                    fn compare(&self, other: &Self) -> [std::cmp::Ordering; $n] {
+                        [$(self.$numbers.cmp(&other.$numbers),)*]
+                    }
+                }
+
+                #[cfg(feature = "assert-partial-ord")]
+                impl <$($args),*> TreeKey<$n> for ($($args,)*)
+                    where $($args: Clone + PartialOrd),*
+                {
+                    #[allow(non_snake_case)]
+                    fn compare(&self, other: &Self) -> [std::cmp::Ordering; $n] {
+                        [$(self.$numbers.partial_cmp(&other.$numbers).unwrap(),)*]
+                    }
+                }
+            };
+        }    
+        
+        tup_compare!(1, [0], [T1]);
+        tup_compare!(2, [0, 1], [T1, T2]);
+        tup_compare!(3, [0, 1, 2], [T1, T2, T3]);
+        tup_compare!(4, [0, 1, 2, 3], [T1, T2, T3, T4]);
+        tup_compare!(5, [0, 1, 2, 3, 4], [T1, T2, T3, T4, T5]);
+        tup_compare!(6, [0, 1, 2, 3, 4, 5], [T1, T2, T3, T4, T5, T6]);
+        tup_compare!(7, [0, 1, 2, 3, 4, 5, 6], [T1, T2, T3, T4, T5, T6, T7]);
+        tup_compare!(8, [0, 1, 2, 3, 4, 5, 6, 7], [T1, T2, T3, T4, T5, T6, T7, T8]);
+        tup_compare!(9, [0, 1, 2, 3, 4, 5, 6, 7, 8], [T1, T2, T3, T4, T5, T6, T7, T8, T9]);
+        tup_compare!(10, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10]);
+        tup_compare!(11, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11]);
+        tup_compare!(12, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12]);
+        tup_compare!(13, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13]);
+        tup_compare!(14, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14]);
+        tup_compare!(15, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15]);
+        tup_compare!(16, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16]);
     }
 }
 
@@ -157,7 +202,7 @@ mod inner {
     impl<K, V, C, const D: usize, const N: usize> Default for TreeMap<K, V, C, D, N>
     where
         C: Dimension<D, N>,
-        V: TreeKey<D>,
+        K: TreeKey<D>,
     {
         fn default() -> Self {
             Self::new()
@@ -181,7 +226,7 @@ mod inner {
 
     impl<K, V, C, const D: usize, const N: usize> TreeMap<K, V, C, D, N>
     where
-        V: TreeKey<D>,
+        K: TreeKey<D>,
         C: Dimension<D, N>,
     {
         /* ---------------------------------------- Public Apis --------------------------------------- */
