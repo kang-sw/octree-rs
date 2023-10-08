@@ -4,6 +4,7 @@
 // - TODO: Tree re-balancing
 
 use std::cmp::Ordering;
+
 pub type BTreeMap<K, V> = TreeMap<K, V, dims::Dimension<1, 2>, 1, 2>;
 pub type QuadTreeMap<K, V> = TreeMap<K, V, dims::Dimension<2, 4>, 2, 4>;
 pub type OctTreeMap<K, V> = TreeMap<K, V, dims::Dimension<3, 8>, 3, 8>;
@@ -15,9 +16,9 @@ pub type OctTreeMap<K, V> = TreeMap<K, V, dims::Dimension<3, 8>, 3, 8>;
 /// You can of course extend tree types by implementing this trait for your own types, but don't
 /// forget to appropriately set `D` and `N`. See alias definitions [`BTree`], [`QuadTree`],
 /// [`OctTree`]
-pub trait Dimension<const D: usize, const N: usize>: Default + Clone {
-    fn children(&self) -> &[usize; N];
-    fn children_mut(&mut self) -> &mut [usize; N];
+pub trait Dimension<const D: usize, const N: usize>: Default + Clone + 'static {
+    fn get(&self) -> &[usize; N];
+    fn get_mut(&mut self) -> &mut [usize; N];
 }
 
 /// Comparable coordinate item.
@@ -87,7 +88,7 @@ struct TreeNode<K, V, C, const D: usize, const N: usize>
 where
     C: Dimension<D, N>,
 {
-    children: C,
+    dims: C,
     key: K,
     value: V,
 }
@@ -184,18 +185,18 @@ pub mod dims {
     }
 
     impl<const D: usize, const N: usize> crate::Dimension<D, N> for Dimension<D, N> {
-        fn children(&self) -> &[usize; N] {
+        fn get(&self) -> &[usize; N] {
             &self.0
         }
 
-        fn children_mut(&mut self) -> &mut [usize; N] {
+        fn get_mut(&mut self) -> &mut [usize; N] {
             &mut self.0
         }
     }
 }
 
 mod inner {
-    use std::borrow::Borrow;
+    use std::{borrow::Borrow, cmp::Ordering};
 
     use crate::{Dimension, TreeKey, TreeMap, TreeNode};
 
@@ -296,14 +297,45 @@ mod inner {
             if self.root == usize::MAX {
                 self.root = self.allocate_node(key, value);
             } else {
+                todo!()
             }
         }
 
-        pub fn get<Q>(&self, key: &Q) -> Option<&V>
+        pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
         where
             K: Borrow<Q>,
+            Q: TreeKey<D>,
         {
-            None
+            todo!()
+        }
+
+        /* -------------------------------------- Iteration ------------------------------------- */
+        /// As it visits all children sequentially and depth-first, it returns sorted result for
+        /// binary trees, however, the order is not very meaningful for higher dimensional trees.
+        pub fn visit_all_recursive(&self, mut vistor: impl FnMut(&K, &V)) {
+            Self::__visit_all_recursive(&self.nodes_pool, self.root, &mut vistor);
+        }
+
+        fn __visit_all_recursive(
+            nodes: &Vec<Option<TreeNode<K, V, C, D, N>>>,
+            node: usize,
+            visitor: &mut impl FnMut(&K, &V),
+        ) {
+            let nd = unsafe { nodes.get_unchecked(node).as_ref().unwrap() };
+
+            for &child in &nd.dims.get()[..N / 2] {
+                if child != usize::MAX {
+                    Self::__visit_all_recursive(nodes, child, visitor);
+                }
+            }
+
+            visitor(&nd.key, &nd.value);
+
+            for &child in &nd.dims.get()[N / 2..] {
+                if child != usize::MAX {
+                    Self::__visit_all_recursive(nodes, child, visitor);
+                }
+            }
         }
 
         /* ------------------------------ Index-based Manipulation ------------------------------ */
@@ -312,19 +344,55 @@ mod inner {
             self.root
         }
 
-        pub fn get_at(&self, index: usize) -> Option<(&K, &V)> {
+        ///
+        pub fn get_by_index(&self, index: usize) -> Option<(&K, &V)> {
             self.nodes_pool
                 .get(index)
-                .and_then(|x| x.as_ref().map(|x| (&x.key, &x.value)))
+                .and_then(|x| x.as_ref())
+                .map(|x| (&x.key, &x.value))
         }
 
-        pub fn get_at_mut(&mut self, index: usize) -> Option<(&K, &mut V)> {
+        ///
+        pub fn get_by_index_mut(&mut self, index: usize) -> Option<(&mut K, &mut V)> {
             self.nodes_pool
                 .get_mut(index)
-                .and_then(|x| x.as_mut().map(|x| (&x.key, &mut x.value)))
+                .and_then(|x| x.as_mut())
+                .map(|x| (&mut x.key, &mut x.value))
+        }
+
+        /// Find or returns matching or closest node(in this case, lower_bound)
+        ///
+        /// Returned index remain valid until you call [`compact`].
+        pub fn find<Q>(&self, pos: &Q) -> Option<Result<usize, usize>>
+        where
+            K: Borrow<Q>,
+            Q: TreeKey<D>,
+        {
+            let mut node = self.root;
+
+            while node != usize::MAX {
+                let nd = unsafe { self.ndget(node) };
+                let compare = nd.key.borrow().compare(pos);
+
+                if compare.iter().all(|&x| x == Ordering::Equal) {
+                    return Some(Ok(node));
+                }
+
+                let child = nd.at_node(compare, true);
+                if child == usize::MAX {
+                    return Some(Err(node));
+                }
+
+                node = child;
+            }
+
+            None
         }
 
         /* ------------------------------------- Inner Impl ------------------------------------- */
+        unsafe fn ndget(&self, index: usize) -> &TreeNode<K, V, C, D, N> {
+            &*(self.nodes_pool.get_unchecked(index).as_ref().unwrap() as *const _)
+        }
 
         /// Allocate empty node
         fn allocate_node(&mut self, key: K, value: V) -> usize {
@@ -355,7 +423,7 @@ mod inner {
 				};
 
                 assert!(
-                    node.children.children().iter().all(|&x| x == usize::MAX),
+                    node.dims.get().iter().all(|&x| x == usize::MAX),
                     "Node at index {} is not empty",
                     index
                 );
@@ -373,13 +441,45 @@ mod inner {
     {
         fn new(key: K, data: V) -> Self {
             Self {
-                children: {
+                dims: {
                     let default = C::default();
-                    debug_assert!(default.children().iter().all(|&x| x == usize::MAX));
+                    debug_assert!(default.get().iter().all(|&x| x == usize::MAX));
                     default
                 },
                 key,
                 value: data,
+            }
+        }
+
+        fn at_dim_index(&self, comparison: [Ordering; D], lower_bound: bool) -> usize {
+            let mut index = 0;
+            let mut bits = 1;
+
+            for order in comparison {
+                let is_left = if lower_bound {
+                    order == Ordering::Less
+                } else {
+                    order != Ordering::Greater
+                };
+
+                if !is_left {
+                    index += bits;
+                }
+
+                bits <<= 1;
+            }
+
+            debug_assert!(index < N);
+            index
+        }
+
+        fn at_node(&self, comparison: [Ordering; D], lower_bound: bool) -> usize {
+            // SAFETY: `at_child` is guaranteed to return valid index
+            unsafe {
+                *self
+                    .dims
+                    .get()
+                    .get_unchecked(self.at_dim_index(comparison, lower_bound))
             }
         }
     }
@@ -392,7 +492,7 @@ mod inner {
     {
         fn clone(&self) -> Self {
             Self {
-                children: self.children.clone(),
+                dims: self.dims.clone(),
                 key: self.key.clone(),
                 value: self.value.clone(),
             }
