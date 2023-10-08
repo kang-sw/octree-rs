@@ -1,10 +1,12 @@
-//! N-dimensional naive octree implementation
+//! N-dimensional naive octree implementation. This only provides the basic functionality of
+//! multi-dimensional tree, and is not very well optimized.
+
+// - TODO: Tree re-balancing
 
 use std::cmp::Ordering;
-
-pub type BTree<T> = Tree<T, dims::Dimension<1, 2>, 1, 2>;
-pub type QuadTree<T> = Tree<T, dims::Dimension<2, 4>, 2, 4>;
-pub type OctTree<T> = Tree<T, dims::Dimension<3, 8>, 3, 8>;
+pub type BTreeMap<K, V> = TreeMap<K, V, dims::Dimension<1, 2>, 1, 2>;
+pub type QuadTreeMap<K, V> = TreeMap<K, V, dims::Dimension<2, 4>, 2, 4>;
+pub type OctTreeMap<K, V> = TreeMap<K, V, dims::Dimension<3, 8>, 3, 8>;
 
 /// Represents which dimension to use. Workaround for rust compiler's not supporting const generics
 /// yet. `D` is the dimensionality of the tree, `N` is the number of children per node. Therefore,
@@ -45,7 +47,7 @@ pub trait Dimension<const D: usize, const N: usize>: Default + Clone {
 /// let quad_tree = ndtree::QuadTree::<[i32;2]>::new();
 /// let quad_tree = ndtree::QuadTree::<([i32;2], String)>::new();
 /// ```
-pub trait TreeItem<const D: usize> {
+pub trait TreeKey<const D: usize> {
     fn compare(&self, other: &Self) -> [Ordering; D];
 }
 
@@ -69,44 +71,35 @@ pub trait TreeItem<const D: usize> {
 /// let quad_tree = ndtree::QuadTree::<([i32;2], String)>::new();
 /// let quad_tree = ndtree::QuadTree::<[i32;2]>::new();
 /// ```
-pub struct Tree<T, C, const D: usize, const N: usize>
+///
+/// ---
+///
+/// As the map manages internal nodes as contiguous pool of array elements, various node index based
+/// operations are provided for advanced control of the tree.
+pub struct TreeMap<K, V, C, const D: usize, const N: usize>
 where
     C: Dimension<D, N>,
 {
-    nodes_pool: Vec<Option<TreeNode<T, C, D, N>>>,
+    nodes_pool: Vec<Option<TreeNode<K, V, C, D, N>>>,
     unused_nodes: Vec<usize>,
 
     root: usize,
 }
 
-struct TreeNode<T, C, const D: usize, const N: usize>
+struct TreeNode<K, V, C, const D: usize, const N: usize>
 where
     C: Dimension<D, N>,
 {
     children: C,
-    data: T,
+    key: K,
+    value: V,
 }
 
 pub mod items {
-    use crate::TreeItem;
+    use crate::TreeKey;
 
     #[cfg(not(feature = "assert-partial-ord"))]
-    impl<const D: usize, C, T> TreeItem<D> for ([C; D], T)
-    where
-        C: Clone + Ord,
-    {
-        fn compare(&self, other: &Self) -> [std::cmp::Ordering; D] {
-            // SAFETY: `D` is a const generic parameter, so it is always known at compile time
-            std::array::from_fn(|index| unsafe {
-                self.0
-                    .get_unchecked(index)
-                    .cmp(other.0.get_unchecked(index))
-            })
-        }
-    }
-
-    #[cfg(not(feature = "assert-partial-ord"))]
-    impl<const D: usize, C> TreeItem<D> for [C; D]
+    impl<const D: usize, C> TreeKey<D> for [C; D]
     where
         C: Clone + Ord,
     {
@@ -119,23 +112,7 @@ pub mod items {
     }
 
     #[cfg(feature = "assert-partial-ord")]
-    impl<const D: usize, C, T> TreeItem<D> for ([C; D], T)
-    where
-        C: Clone + PartialOrd,
-    {
-        fn compare(&self, other: &Self) -> [std::cmp::Ordering; D] {
-            // SAFETY: `D` is a const generic parameter, so it is always known at compile time
-            std::array::from_fn(|index| unsafe {
-                self.0
-                    .get_unchecked(index)
-                    .partial_cmp(other.0.get_unchecked(index))
-                    .unwrap()
-            })
-        }
-    }
-
-    #[cfg(feature = "assert-partial-ord")]
-    impl<const D: usize, C> TreeItem<D> for [C; D]
+    impl<const D: usize, C> TreeKey<D> for [C; D]
     where
         C: Clone + PartialOrd,
     {
@@ -173,22 +150,25 @@ pub mod dims {
 }
 
 mod inner {
-    use crate::{Dimension, Tree, TreeItem, TreeNode};
+    use std::borrow::Borrow;
 
-    impl<T, C, const D: usize, const N: usize> Default for Tree<T, C, D, N>
+    use crate::{Dimension, TreeKey, TreeMap, TreeNode};
+
+    impl<K, V, C, const D: usize, const N: usize> Default for TreeMap<K, V, C, D, N>
     where
         C: Dimension<D, N>,
-        T: TreeItem<D>,
+        V: TreeKey<D>,
     {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl<T, C, const D: usize, const N: usize> Clone for Tree<T, C, D, N>
+    impl<K, V, C, const D: usize, const N: usize> Clone for TreeMap<K, V, C, D, N>
     where
         C: Dimension<D, N>,
-        T: Clone,
+        K: Clone,
+        V: Clone,
     {
         fn clone(&self) -> Self {
             Self {
@@ -199,23 +179,24 @@ mod inner {
         }
     }
 
-    impl<T, C, const D: usize, const N: usize> Tree<T, C, D, N>
+    impl<K, V, C, const D: usize, const N: usize> TreeMap<K, V, C, D, N>
     where
-        T: TreeItem<D>,
+        V: TreeKey<D>,
         C: Dimension<D, N>,
     {
+        /* ---------------------------------------- Public Apis --------------------------------------- */
+
+        /// Create tree with a given capacity. This is useful if you know the approximate number of
+        /// nodes in the tree beforehand.
         pub fn with_capacity(capacity: usize) -> Self {
             Self {
-                nodes_pool: {
-                    let mut value = Vec::with_capacity(capacity);
-                    value.resize_with(capacity, || None);
-                    value
-                },
+                nodes_pool: Vec::with_capacity(capacity),
                 unused_nodes: Vec::with_capacity(capacity),
                 root: usize::MAX,
             }
         }
 
+        /// Create empty tree. This does not allocate any memory.
         pub fn new() -> Self {
             Self {
                 nodes_pool: Vec::new(),
@@ -223,33 +204,152 @@ mod inner {
                 root: usize::MAX,
             }
         }
+
+        /// Returns the number of nodes in the tree.
+        pub fn len(&self) -> usize {
+            self.nodes_pool.len() - self.unused_nodes.len()
+        }
+
+        /// Returns `true` if the tree is empty.
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+
+        /// Returns the capacity of the tree.
+        pub fn capacity(&self) -> usize {
+            self.nodes_pool.capacity()
+        }
+
+        /// Clear nodes
+        pub fn clear(&mut self) {
+            self.nodes_pool.clear();
+            self.unused_nodes.clear();
+            self.root = usize::MAX;
+        }
+
+        /// Shrink to fit
+        pub fn shrink_to_fit(&mut self) {
+            self.nodes_pool.shrink_to_fit();
+            self.unused_nodes.shrink_to_fit();
+        }
+
+        /// Fill holes in the tree nodes pool. This is useful if you have deleted a lot of nodes
+        /// and want to reclaim the memory.
+        ///
+        /// May make slight improvement on cache locality.
+        pub fn make_compact(&mut self) {
+            // TODO:
+        }
+
+        /// Reserve space for nodes
+        pub fn reserve(&mut self, additional: usize) {
+            self.nodes_pool.reserve(additional);
+            self.unused_nodes.reserve(additional);
+        }
+
+        pub fn insert(&mut self, key: K, value: V) {
+            if self.root == usize::MAX {
+                self.root = self.allocate_node(key, value);
+            } else {
+            }
+        }
+
+        pub fn get<Q>(&self, key: &Q) -> Option<&V>
+        where
+            K: Borrow<Q>,
+        {
+            None
+        }
+
+        /* ------------------------------ Index-based Manipulation ------------------------------ */
+
+        pub fn root(&self) -> usize {
+            self.root
+        }
+
+        pub fn get_at(&self, index: usize) -> Option<(&K, &V)> {
+            self.nodes_pool
+                .get(index)
+                .and_then(|x| x.as_ref().map(|x| (&x.key, &x.value)))
+        }
+
+        pub fn get_at_mut(&mut self, index: usize) -> Option<(&K, &mut V)> {
+            self.nodes_pool
+                .get_mut(index)
+                .and_then(|x| x.as_mut().map(|x| (&x.key, &mut x.value)))
+        }
+
+        /* ------------------------------------- Inner Impl ------------------------------------- */
+
+        /// Allocate empty node
+        fn allocate_node(&mut self, key: K, value: V) -> usize {
+            let at = if let Some(index) = self.unused_nodes.pop() {
+                index
+            } else {
+                let index = self.nodes_pool.len();
+                self.nodes_pool.push(None);
+                index
+            };
+
+            let new_node = TreeNode::new(key, value);
+
+            if cfg!(debug_assertions) {
+                assert!(self.nodes_pool[at].replace(new_node).is_none());
+            } else {
+                self.nodes_pool[at] = Some(new_node);
+            }
+
+            at
+        }
+
+        /// Release given node
+        fn release_node(&mut self, index: usize) {
+            if cfg!(debug_assertions) {
+                let Some(node) = self.nodes_pool[index].take() else {
+					panic!("Node at index {} is already released", index);
+				};
+
+                assert!(
+                    node.children.children().iter().all(|&x| x == usize::MAX),
+                    "Node at index {} is not empty",
+                    index
+                );
+            } else {
+                self.nodes_pool[index] = None;
+            }
+
+            self.unused_nodes.push(index);
+        }
     }
 
-    impl<T, C, const D: usize, const N: usize> TreeNode<T, C, D, N>
+    impl<K, V, C, const D: usize, const N: usize> TreeNode<K, V, C, D, N>
     where
         C: Dimension<D, N>,
     {
-        fn new(data: T) -> Self {
+        fn new(key: K, data: V) -> Self {
             Self {
                 children: {
                     let default = C::default();
                     debug_assert!(default.children().iter().all(|&x| x == usize::MAX));
                     default
                 },
-                data,
+                key,
+                value: data,
             }
         }
     }
 
-    impl<T, C, const D: usize, const N: usize> Clone for TreeNode<T, C, D, N>
+    impl<K, V, C, const D: usize, const N: usize> Clone for TreeNode<K, V, C, D, N>
     where
         C: Dimension<D, N>,
-        T: Clone,
+        K: Clone,
+        V: Clone,
     {
         fn clone(&self) -> Self {
             Self {
                 children: self.children.clone(),
-                data: self.data.clone(),
+                key: self.key.clone(),
+                value: self.value.clone(),
             }
         }
     }
